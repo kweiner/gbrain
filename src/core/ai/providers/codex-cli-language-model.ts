@@ -225,7 +225,20 @@ interface CodexResult {
  * degrade to "no usage data", not crash a response that otherwise parsed.
  */
 function parseJsonEvents(stdout: string): { text: string | null; usage: CodexUsage } {
-  let text: string | null = null;
+  // A single turn can emit MULTIPLE agent_message item.completed events —
+  // confirmed against real Codex CLI 0.146.0 output: a short natural-
+  // language preamble ("I'll check X first...") as one event, then the
+  // actual <use_tools> block as a separate, later event. Keeping only the
+  // LAST agent_message (the original approach) silently discards the tool
+  // call whenever trailing commentary follows it instead of preceding it —
+  // extractToolCalls then finds no <use_tools> block in what's left and the
+  // turn looks like a flat refusal/text-only response, even though the
+  // model genuinely attempted the tool call. Concatenating every
+  // agent_message in emission order (mirrors how a single -o file used to
+  // hold the whole response as one string) fixes this: extractToolCalls
+  // finds the block wherever it lands, and everything else becomes
+  // beforeText/afterText around it, same as before.
+  const messages: string[] = [];
   let usage: CodexUsage = { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined };
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim();
@@ -241,7 +254,7 @@ function parseJsonEvents(stdout: string): { text: string | null; usage: CodexUsa
     if (e.type === 'item.completed') {
       const item = e.item as Record<string, unknown> | undefined;
       if (item?.type === 'agent_message' && typeof item.text === 'string') {
-        text = item.text;
+        messages.push(item.text);
       }
     } else if (e.type === 'turn.completed') {
       const u = e.usage as Record<string, unknown> | undefined;
@@ -258,12 +271,13 @@ function parseJsonEvents(stdout: string): { text: string | null; usage: CodexUsa
       }
     }
   }
-  return { text, usage };
+  return { text: messages.length > 0 ? messages.join('\n\n') : null, usage };
 }
 
 /**
  * Spawn `codex exec` with the contamination-suppression flags and return the
- * final agent message plus real token usage, parsed from the `--json` event
+ * concatenated agent message text (see parseJsonEvents — a turn can emit
+ * more than one) plus real token usage, parsed from the `--json` event
  * stream. Aborts propagate to SIGTERM on the child.
  */
 function runCodex(
