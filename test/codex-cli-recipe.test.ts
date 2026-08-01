@@ -193,6 +193,55 @@ describe('codex-cli LanguageModel — text-only round trip', () => {
 });
 
 describe('codex-cli LanguageModel — tool use', () => {
+  // Discrimination test for a real production incident: replaying a real
+  // failing prompt against Codex CLI 0.146.0 showed a single turn can emit
+  // TWO SEPARATE item.completed/agent_message events — a short commentary
+  // preamble first, then the actual <use_tools> block as its own later
+  // event. The original parseJsonEvents kept only the LAST agent_message;
+  // when commentary happened to come first this worked by accident, but
+  // nothing guaranteed that order. This test stages the events in the
+  // OPPOSITE order (tool block first, trailing commentary second) — the
+  // shape that silently discarded every real tool call in production,
+  // making the subagent loop look like it had "lost access to its tools"
+  // when it had actually just formatted its response across two events.
+  test('finds the <use_tools> block even when a separate agent_message event follows it (real Codex CLI 0.146.0 shape)', async () => {
+    await withStubEnv(async () => {
+      writeFileSync(
+        stubResponsePath,
+        [
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({
+            type: 'item.completed',
+            item: {
+              id: 'item_0',
+              type: 'agent_message',
+              text: '<use_tools>\n[{"id": "toolu_split", "name": "search", "input": {"query": "split across events"}}]\n</use_tools>',
+            },
+          }),
+          JSON.stringify({
+            type: 'item.completed',
+            item: { id: 'item_1', type: 'agent_message', text: 'Running that search now.' },
+          }),
+          JSON.stringify({ type: 'turn.completed', usage: STUB_USAGE }),
+        ].join('\n') + '\n',
+      );
+      const { CodexCliLanguageModel } = await import('../src/core/ai/providers/codex-cli-language-model.ts');
+      const model = new CodexCliLanguageModel('gpt-5.6-terra');
+      const result = await model.doGenerate({
+        prompt: [userMessage('split-event tool call')],
+        tools: [{ type: 'function', name: 'search', description: '', inputSchema: { type: 'object', properties: {} } }],
+      } as LanguageModelV2CallOptions);
+
+      // The discriminating assertion: on the pre-fix code this is 'stop'
+      // with zero tool-calls, because only 'Running that search now.'
+      // (item_1) survived — the entire <use_tools> block was discarded.
+      expect(result.finishReason).toBe('tool-calls');
+      const calls = result.content.filter(c => c.type === 'tool-call');
+      expect(calls).toHaveLength(1);
+      expect((calls[0] as { toolName: string }).toolName).toBe('search');
+    });
+  });
+
   test('parses <use_tools> block into LanguageModelV2 tool-call content', async () => {
     await withStubEnv(async () => {
       stageResponse(
