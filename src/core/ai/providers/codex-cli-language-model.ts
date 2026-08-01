@@ -474,8 +474,31 @@ export class CodexCliLanguageModel implements LanguageModelV2 {
     const toolInstructions = buildToolUseInstructions(options.tools);
     // No --system-prompt flag on codex exec: system text + tool protocol
     // lead the stdin prompt as a `## System` section instead.
+    //
+    // Real production incident: gbrain's shared subagent system prompt
+    // (DEFAULT_SUBAGENT_SYSTEM, used unmodified by claude-cli too) is
+    // written in native-tool-calling language — "you have the following
+    // tools available... call the tool", "if one is in your registry".
+    // Claude apparently shrugs this off and just follows the later
+    // <use_tools> text protocol regardless; gpt-5.6-terra did not — it
+    // read "in your registry" literally, didn't find a native function
+    // registry (there isn't one; codex-cli has no native tool calling),
+    // concluded it had no tool access, and returned a flat refusal —
+    // sometimes after having already used tools successfully in an
+    // earlier turn. This disambiguation note is codex-cli-specific
+    // (inserted here, not in the shared system prompt, so claude-cli and
+    // any other provider are untouched) and only added when tools are
+    // actually offered.
+    const codexToolClarification = toolInstructions
+      ? '\n\nNote on tool access in this environment: any earlier mention of ' +
+        'tools being "in your registry" or natively callable refers to the ' +
+        'text-based protocol below, not a native function-calling API — ' +
+        'there is no separate registry to check. If you have followed the ' +
+        '"## Tool Use Protocol" section below, you DO have tool access. Do ' +
+        'not conclude you lack tools; use the <use_tools> block.'
+      : '';
     const fullPrompt = [
-      systemText ? `## System\n\n${systemText}` : '',
+      systemText ? `## System\n\n${systemText}${codexToolClarification}` : '',
       toolInstructions,
       userPrompt,
     ].filter(s => s.length > 0).join('\n\n');
