@@ -17,7 +17,7 @@
  * withEnv's save/restore in try/finally is sufficient; no leakage to
  * sibling test files in the same bun-test process.
  */
-import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll, mock } from 'bun:test';
 import { writeFileSync, chmodSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -29,9 +29,9 @@ const stubBin = join(stubDir, 'codex');
 const stubResponsePath = join(stubDir, 'codex_response.txt');
 
 /**
- * Default stub: consume stdin, require the `exec` subcommand, find the
- * argument after `-o`, and copy the staged response there — the same
- * channel `codex exec -o <file>` uses for the final agent message.
+ * Default stub: consume stdin, require the `exec` subcommand and `--json`
+ * flag, and cat the staged JSONL event stream to stdout — the same channel
+ * `codex exec --json` uses for the final agent message + turn usage.
  */
 function fastStubScript(): string {
   return [
@@ -41,15 +41,24 @@ function fastStubScript(): string {
     '  *" exec "*|"exec "*) ;;',
     '  *) echo "missing exec subcommand in argv: $*" >&2; exit 64 ;;',
     'esac',
-    'out=""',
-    'prev=""',
-    'for a in "$@"; do',
-    '  if [ "$prev" = "-o" ]; then out="$a"; fi',
-    '  prev="$a"',
-    'done',
-    'if [ -z "$out" ]; then echo "missing -o <file> in argv: $*" >&2; exit 65; fi',
-    `cat "${stubResponsePath}" > "$out"`,
+    'case " $* " in',
+    '  *" --json "*) ;;',
+    '  *) echo "missing --json in argv: $*" >&2; exit 66 ;;',
+    'esac',
+    `cat "${stubResponsePath}"`,
   ].join('\n');
+}
+
+/** Default staged usage for tests that don't care about the exact numbers. */
+const STUB_USAGE = { input_tokens: 123, cached_input_tokens: 0, cache_write_input_tokens: 0, output_tokens: 45, reasoning_output_tokens: 0 };
+
+/** Builds the `--json` JSONL event stream a real `codex exec --json` run emits. */
+function jsonEventStream(text: string, usage: typeof STUB_USAGE = STUB_USAGE): string {
+  return [
+    JSON.stringify({ type: 'turn.started' }),
+    JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text } }),
+    JSON.stringify({ type: 'turn.completed', usage }),
+  ].join('\n') + '\n';
 }
 
 beforeAll(() => {
@@ -67,7 +76,7 @@ function withStubEnv<T>(fn: () => T | Promise<T>): Promise<T> {
 }
 
 function stageResponse(text: string): void {
-  writeFileSync(stubResponsePath, text);
+  writeFileSync(stubResponsePath, jsonEventStream(text));
 }
 
 function restoreFastStub(): void {
@@ -100,10 +109,42 @@ describe('codex-cli recipe registration', () => {
     expect(recipe!.aliases!['terra']).toBe('gpt-5.6-terra');
     expect(recipe!.aliases!['sol']).toBe('gpt-5.6-sol');
   });
+
+  // Discrimination test: proves the recipe DERIVES its cost fields from
+  // CANONICAL_PRICING at import time rather than carrying a hardcoded copy
+  // that happens to currently match. A plain value-equality check (recipe
+  // value === canonical value) would pass even on a hardcoded literal that
+  // was copy-pasted from today's canonical number — exactly the "proves
+  // nothing" shallow test this project's review flags. Mocking the
+  // canonical lookup to a value nothing would hand-copy (99.99/199.99) and
+  // asserting the recipe follows it is what actually distinguishes "sourced
+  // from" from "coincidentally equal to". Fails on a reverted/hardcoded
+  // recipe: mock.restore() below undoes the mock, but the reverted recipe
+  // would still show 1.25/10.0 instead of the mocked value while the mock
+  // is active, which is the failure this test exists to catch.
+  test('cost fields track CANONICAL_PRICING even when the canonical value changes (not a hardcoded duplicate)', async () => {
+    const pricingModule = await import('../src/core/model-pricing.ts');
+    const original = pricingModule.CANONICAL_PRICING['openai:gpt-5.6-terra'];
+    const mockRate = { input: 99.99, output: 199.99 };
+    mock.module('../src/core/model-pricing.ts', () => ({
+      ...pricingModule,
+      canonicalLookup: (id: string) => (id === 'openai:gpt-5.6-terra' ? mockRate : pricingModule.canonicalLookup(id)),
+    }));
+    try {
+      // Bust the module cache so the recipe re-evaluates its top-level
+      // canonicalLookup() call against the mock, not a previously-cached import.
+      const recipeModule = await import(`../src/core/ai/recipes/codex-cli.ts?bust=${Date.now()}`);
+      expect(recipeModule.codexCli.touchpoints.chat!.cost_per_1m_input_usd).toBe(mockRate.input);
+      expect(recipeModule.codexCli.touchpoints.chat!.cost_per_1m_output_usd).toBe(mockRate.output);
+    } finally {
+      mock.module('../src/core/model-pricing.ts', () => pricingModule);
+      expect(original).toBeDefined(); // sanity: the real entry still exists post-restore
+    }
+  });
 });
 
 describe('codex-cli LanguageModel — text-only round trip', () => {
-  test('returns a single text content block with stop finish reason and undefined usage', async () => {
+  test('returns a single text content block with stop finish reason and real usage from turn.completed', async () => {
     await withStubEnv(async () => {
       stageResponse('hello world');
       const { CodexCliLanguageModel } = await import('../src/core/ai/providers/codex-cli-language-model.ts');
@@ -115,9 +156,32 @@ describe('codex-cli LanguageModel — text-only round trip', () => {
       expect(result.finishReason).toBe('stop');
       expect(result.content).toHaveLength(1);
       expect(result.content[0]).toEqual({ type: 'text', text: 'hello world' });
-      // The -o channel carries no token accounting; usage is honest-undefined.
+      // Real token counts parsed from the --json event stream's turn.completed.
+      expect(result.usage.inputTokens).toBe(STUB_USAGE.input_tokens);
+      expect(result.usage.outputTokens).toBe(STUB_USAGE.output_tokens);
+      expect(result.usage.totalTokens).toBe(STUB_USAGE.input_tokens + STUB_USAGE.output_tokens);
+    });
+  });
+
+  test('usage is undefined when turn.completed carries no usage field', async () => {
+    await withStubEnv(async () => {
+      writeFileSync(
+        stubResponsePath,
+        [
+          JSON.stringify({ type: 'turn.started' }),
+          JSON.stringify({ type: 'item.completed', item: { id: 'item_0', type: 'agent_message', text: 'hi' } }),
+          JSON.stringify({ type: 'turn.completed' }),
+        ].join('\n') + '\n',
+      );
+      const { CodexCliLanguageModel } = await import('../src/core/ai/providers/codex-cli-language-model.ts');
+      const model = new CodexCliLanguageModel('gpt-5.6-terra');
+      const result = await model.doGenerate({
+        prompt: [userMessage('hi')],
+      } as LanguageModelV2CallOptions);
+
       expect(result.usage.inputTokens).toBeUndefined();
       expect(result.usage.outputTokens).toBeUndefined();
+      expect(result.usage.totalTokens).toBeUndefined();
     });
   });
 
@@ -315,13 +379,7 @@ describe('codex-cli LanguageModel — context isolation', () => {
         `printf "%s\\n" "$@" > "${argvLog}"`,
         `pwd > "${cwdLog}"`,
         `cat > "${stdinLog}"`,
-        'out=""',
-        'prev=""',
-        'for a in "$@"; do',
-        '  if [ "$prev" = "-o" ]; then out="$a"; fi',
-        '  prev="$a"',
-        'done',
-        `cat "${stubResponsePath}" > "$out"`,
+        `cat "${stubResponsePath}"`,
       ].join('\n');
       writeFileSync(stubBin, recordStub);
       chmodSync(stubBin, 0o755);
@@ -349,6 +407,7 @@ describe('codex-cli LanguageModel — context isolation', () => {
         expect(argv).toContain('--sandbox');
         expect(argv).toContain('read-only');
         expect(argv).toContain('--skip-git-repo-check');
+        expect(argv).toContain('--json');
         expect(argv).toContain('-m');
         expect(argv).toContain('gpt-5.6-terra');
         // Prompt arrives on stdin (argv has a hard size ceiling).
@@ -377,13 +436,7 @@ describe('codex-cli LanguageModel — context isolation', () => {
             '#!/bin/sh',
             `printf "key=%s\\nbase=%s\\n" "\${OPENAI_API_KEY:-UNSET}" "\${OPENAI_BASE_URL:-UNSET}" > "${envLog}"`,
             'cat > /dev/null',
-            'out=""',
-            'prev=""',
-            'for a in "$@"; do',
-            '  if [ "$prev" = "-o" ]; then out="$a"; fi',
-            '  prev="$a"',
-            'done',
-            `cat "${stubResponsePath}" > "$out"`,
+            `cat "${stubResponsePath}"`,
           ].join('\n');
           writeFileSync(stubBin, envStub);
           chmodSync(stubBin, 0o755);
@@ -481,7 +534,7 @@ describe('codex-cli LanguageModel — abort + error surfaces', () => {
     });
   });
 
-  test('rejects when the CLI exits 0 without writing the -o file', async () => {
+  test('rejects when the CLI exits 0 without emitting an agent_message event', async () => {
     await withStubEnv(async () => {
       const silentStub = [
         '#!/bin/sh',
@@ -495,7 +548,7 @@ describe('codex-cli LanguageModel — abort + error surfaces', () => {
         const model = new CodexCliLanguageModel('gpt-5.6-terra');
         await expect(
           model.doGenerate({ prompt: [userMessage('x')] } as LanguageModelV2CallOptions),
-        ).rejects.toThrow(/wrote no final message/);
+        ).rejects.toThrow(/produced no agent_message event/);
       } finally {
         restoreFastStub();
       }

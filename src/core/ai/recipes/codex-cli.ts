@@ -1,4 +1,20 @@
 import type { Recipe } from '../types.ts';
+import { canonicalLookup } from '../../model-pricing.ts';
+
+// Source of truth is CANONICAL_PRICING (model-pricing.ts), not a
+// hand-copied literal here — closes the drift-guard blind spot flagged in
+// review: a hardcoded number for a model id absent from the canonical
+// table is invisible to test/model-pricing.test.ts's drift guard. Both
+// codex-cli models share one rate today; if that ever changes, splitting
+// the `chat` touchpoint per-model is the future extension point, not
+// re-introducing a hardcoded duplicate.
+const CODEX_CLI_PRICING = canonicalLookup('openai:gpt-5.6-terra');
+if (!CODEX_CLI_PRICING) {
+  throw new Error(
+    'codex-cli recipe: missing CANONICAL_PRICING entry for openai:gpt-5.6-terra — ' +
+    'add it to src/core/model-pricing.ts before this recipe can compute its cost fields.',
+  );
+}
 
 /**
  * GPT via the local `codex` CLI binary, using its built-in ChatGPT OAuth
@@ -48,9 +64,10 @@ export const codexCli: Recipe = {
       // Cost figures match the underlying OpenAI API tier, but the actual
       // bill is borne by the subscription. We report them for the budget
       // ledger's per-call accounting; operators on flat-rate subscriptions
-      // can treat the numbers as nominal.
-      cost_per_1m_input_usd: 1.25,
-      cost_per_1m_output_usd: 10.0,
+      // can treat the numbers as nominal. Sourced from CANONICAL_PRICING,
+      // not hardcoded — see the import above.
+      cost_per_1m_input_usd: CODEX_CLI_PRICING.input,
+      cost_per_1m_output_usd: CODEX_CLI_PRICING.output,
       price_last_verified: '2026-07-29',
     },
   },

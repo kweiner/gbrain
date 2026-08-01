@@ -132,6 +132,13 @@ export const CANONICAL_PRICING: Record<string, ModelPricing> = {
   // family flagship (sol). These rows are LOAD-BEARING for latest-model
   // discovery (src/core/ai/openai-latest.ts): only priced ids are eligible
   // as defaults, so budget caps never fail closed on a discovered model.
+  //
+  // Supersedes this fork's own 2026-07-29 placeholder (terra/sol both nominally
+  // priced at the gpt-5.2 API-tier rate, $1.25/$10.00, because no public
+  // per-token pricing existed yet for the subscription-only Codex CLI ids at
+  // the time). These are real published rates, not a nominal stand-in — kept
+  // as upstream's version on rebase (codex-cli.ts's CODEX_CLI_PRICING still
+  // derives from this table dynamically, so no other file needed a change).
   'openai:gpt-5.6':                       { input:  5.00, output: 30.00 },
   'openai:gpt-5.6-sol':                   { input:  5.00, output: 30.00 },
   'openai:gpt-5.6-terra':                 { input:  2.50, output: 15.00 },

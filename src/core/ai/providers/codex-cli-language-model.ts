@@ -34,16 +34,19 @@
  *   - Codex has no `--system-prompt` flag, so system messages are rendered
  *     as a leading `## System` section of the stdin prompt.
  *
- * Output channel: `-o <file>` writes the agent's final message verbatim;
- * stdout carries progress logs and is discarded. Token usage is not exposed
- * on this channel, so usage fields are undefined (the budget ledger treats
- * subscription-billed calls as nominal anyway — see the recipe comment).
+ * Output channel: `--json` puts codex exec into JSONL event mode on stdout.
+ * We take the last `item.completed` event of type `agent_message` as the
+ * final response text (mirrors the old `-o <file>` semantics — "the final
+ * message" — without needing a scratch output file), and read real token
+ * counts off the `turn.completed` event's `usage` object. Confirmed present
+ * on Codex CLI 0.146.0: `{input_tokens, cached_input_tokens,
+ * cache_write_input_tokens, output_tokens, reasoning_output_tokens}`.
  *
  * doStream is not yet implemented; the model declares no streaming. Callers
  * (gateway.toolLoop primarily) use doGenerate.
  */
 import { spawn } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
@@ -203,21 +206,72 @@ function renderPrompt(prompt: LanguageModelV2Prompt): { systemText: string; user
   return { systemText: systemParts.join('\n'), userPrompt: convo.join('\n\n') };
 }
 
+interface CodexUsage {
+  inputTokens: number | undefined;
+  outputTokens: number | undefined;
+  totalTokens: number | undefined;
+}
+
+interface CodexResult {
+  text: string;
+  usage: CodexUsage;
+}
+
+/**
+ * Parse the `--json` JSONL event stream: the final `agent_message`'s text
+ * (mirrors the old `-o <file>` "final message" contract) plus real token
+ * usage from `turn.completed`. Malformed/partial lines are skipped rather
+ * than thrown on — a truncated final line (process killed mid-write) should
+ * degrade to "no usage data", not crash a response that otherwise parsed.
+ */
+function parseJsonEvents(stdout: string): { text: string | null; usage: CodexUsage } {
+  let text: string | null = null;
+  let usage: CodexUsage = { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined };
+  for (const line of stdout.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof event !== 'object' || event === null) continue;
+    const e = event as Record<string, unknown>;
+    if (e.type === 'item.completed') {
+      const item = e.item as Record<string, unknown> | undefined;
+      if (item?.type === 'agent_message' && typeof item.text === 'string') {
+        text = item.text;
+      }
+    } else if (e.type === 'turn.completed') {
+      const u = e.usage as Record<string, unknown> | undefined;
+      if (u) {
+        const inputTokens = typeof u.input_tokens === 'number' ? u.input_tokens : undefined;
+        const outputTokens = typeof u.output_tokens === 'number' ? u.output_tokens : undefined;
+        usage = {
+          inputTokens,
+          outputTokens,
+          totalTokens: inputTokens !== undefined && outputTokens !== undefined
+            ? inputTokens + outputTokens
+            : undefined,
+        };
+      }
+    }
+  }
+  return { text, usage };
+}
+
 /**
  * Spawn `codex exec` with the contamination-suppression flags and return the
- * final agent message from the `-o` output file. Aborts propagate to SIGTERM
- * on the child.
+ * final agent message plus real token usage, parsed from the `--json` event
+ * stream. Aborts propagate to SIGTERM on the child.
  */
 function runCodex(
   fullPrompt: string,
   model: string,
   signal?: AbortSignal,
-): Promise<string> {
+): Promise<CodexResult> {
   return new Promise((resolve, reject) => {
-    const outFile = join(
-      ensureCleanCwd(),
-      `codex-out-${Date.now()}-${Math.random().toString(36).slice(2, 10)}.txt`,
-    );
     const args = [
       'exec',
       // Agent isolation: this subprocess must behave like a raw LLM, not a
@@ -227,13 +281,15 @@ function runCodex(
       // including gbrain's own MCP → recursion + PGLite single-writer lock
       // contention. `--sandbox read-only` pins the sandbox for defense in
       // depth. `-C` + `--skip-git-repo-check` keep AGENTS.md discovery and
-      // the repo probe out of a clean tmpdir.
+      // the repo probe out of a clean tmpdir. `--json` switches stdout to a
+      // JSONL event stream carrying both the final message and real token
+      // usage — see parseJsonEvents.
       '--ignore-user-config',
       '--sandbox', 'read-only',
       '--skip-git-repo-check',
+      '--json',
       '-C', ensureCleanCwd(),
       '-m', model,
-      '-o', outFile,
       // Read the prompt from stdin — argv has a hard size ceiling and
       // subagent prompts (context + tool specs) routinely exceed it.
       '-',
@@ -268,16 +324,6 @@ function runCodex(
       signal.addEventListener('abort', onAbort, { once: true });
     }
 
-    const readOutFile = (): string | null => {
-      try {
-        const text = readFileSync(outFile, 'utf8');
-        rmSync(outFile, { force: true });
-        return text;
-      } catch {
-        return null;
-      }
-    };
-
     child.on('error', err => {
       if (signal) signal.removeEventListener('abort', onAbort);
       reject(new Error(`codex-cli spawn failed: ${err instanceof Error ? err.message : String(err)}`));
@@ -290,14 +336,14 @@ function runCodex(
         reject(new Error(`codex-cli exited ${code}: ${detail}${cwdAccessHint(detail)}`));
         return;
       }
-      const text = readOutFile();
+      const { text, usage } = parseJsonEvents(stdout);
       if (text === null || text.trim().length === 0) {
         reject(new Error(
-          `codex-cli exited 0 but wrote no final message to -o file\n--- stderr ---\n${stderr.slice(0, 500)}`,
+          `codex-cli exited 0 but produced no agent_message event\n--- stderr ---\n${stderr.slice(0, 500)}`,
         ));
         return;
       }
-      resolve(text.trim());
+      resolve({ text: text.trim(), usage });
     });
 
     // stdin error handler: if the binary does not exist (ENOENT) or the child
@@ -420,7 +466,7 @@ export class CodexCliLanguageModel implements LanguageModelV2 {
       userPrompt,
     ].filter(s => s.length > 0).join('\n\n');
 
-    const raw = await runCodex(fullPrompt, this.modelId, options.abortSignal);
+    const { text: raw, usage } = await runCodex(fullPrompt, this.modelId, options.abortSignal);
     const { toolCalls, beforeText, afterText } = extractToolCalls(raw);
 
     const content: LanguageModelV2Content[] = [];
@@ -444,10 +490,9 @@ export class CodexCliLanguageModel implements LanguageModelV2 {
     return {
       content,
       finishReason,
-      // The -o output channel carries no token accounting; leave usage
-      // undefined rather than fabricate numbers (subscription billing makes
-      // the ledger nominal for this recipe anyway).
-      usage: { inputTokens: undefined, outputTokens: undefined, totalTokens: undefined },
+      // Real token counts from the --json event stream's turn.completed
+      // usage object (see parseJsonEvents) — no longer fabricated/undefined.
+      usage,
       warnings: [],
     };
   }
