@@ -38,10 +38,19 @@ export const EMBEDDING_PRICING: Record<string, EmbeddingPricing> = {
   // deliberately absent because routers can mark up, and silently pricing a
   // router at vendor rates would under-estimate spend and give a wrong cap.
   //
-  // Pass-through verified 2026-08-06 against https://openrouter.ai/api/v1/models:
-  // openai/gpt-4o and anthropic/claude-haiku-4.5 both match vendor list price
-  // to the cent (+0.0%). Re-verify on the same cycle as the rates above; if
-  // OpenRouter starts charging a spread, this entry must move with it.
+  // Rate verified 2026-08-06 against OpenRouter's own embeddings catalogue,
+  // https://openrouter.ai/api/v1/embeddings/models — a SEPARATE endpoint from
+  // /api/v1/models, which carries chat models only and lists no embeddings.
+  // That catalogue reports openai/text-embedding-3-small at $0.02/MTok, and
+  // every other embedding model it lists that also appears above matches this
+  // table to the cent (3-large 0.13, ada-002 0.10, voyage-4 0.06, voyage-4-lite
+  // 0.02, mistral-embed-2312 0.10, pplx-embed-v1-4b 0.03) — i.e. OpenRouter
+  // passes embedding pricing through at vendor rates.
+  //
+  // Because that endpoint is machine-readable, this entry (and the router half
+  // of this table generally) is a candidate for a periodic fetch rather than a
+  // hand-maintained constant. Until then: re-verify on the same cycle as the
+  // rates above.
   'openrouter:openai/text-embedding-3-small': { pricePerMTok: 0.02 },
   // Legacy OpenAI ada (still common in older brains)
   'openai:text-embedding-ada-002': { pricePerMTok: 0.10 },
