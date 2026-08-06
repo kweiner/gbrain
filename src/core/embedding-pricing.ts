@@ -32,6 +32,17 @@ export const EMBEDDING_PRICING: Record<string, EmbeddingPricing> = {
   // OpenAI (https://developers.openai.com/api/docs/pricing, verified 2026-07-28)
   'openai:text-embedding-3-large': { pricePerMTok: 0.13 },
   'openai:text-embedding-3-small': { pricePerMTok: 0.02 },
+  // OpenRouter proxies OpenAI's text-embedding-3-small through /v1/embeddings
+  // (see ai/recipes/openrouter.ts) at pass-through cost. This is an EXPLICIT
+  // entry, not a generic "strip the router prefix" fallback — that fallback is
+  // deliberately absent because routers can mark up, and silently pricing a
+  // router at vendor rates would under-estimate spend and give a wrong cap.
+  //
+  // Pass-through verified 2026-08-06 against https://openrouter.ai/api/v1/models:
+  // openai/gpt-4o and anthropic/claude-haiku-4.5 both match vendor list price
+  // to the cent (+0.0%). Re-verify on the same cycle as the rates above; if
+  // OpenRouter starts charging a spread, this entry must move with it.
+  'openrouter:openai/text-embedding-3-small': { pricePerMTok: 0.02 },
   // Legacy OpenAI ada (still common in older brains)
   'openai:text-embedding-ada-002': { pricePerMTok: 0.10 },
   // Voyage (https://docs.voyageai.com/docs/pricing, verified 2026-08-21)
