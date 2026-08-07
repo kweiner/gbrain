@@ -120,9 +120,12 @@ const GATEWAY_REFRESH_JOB_NAMES = new Set([
   'connector-sync',
   'extract-takes-from-pages',
   'embed-catch-up',
-  // #3387: chronicle_extract's judge is a gateway chat call — without the
-  // refresh a worker booted before `config set` never saw the DB-plane chat
-  // model and every extraction silently returned no_events.
+  // #3387: the chronicle judge bails on `isAvailable('chat') === false` and
+  // reports `no_events` — indistinguishable from a page that genuinely had
+  // nothing to extract, and unmetered (its chat() call carries no
+  // BudgetTracker, so nothing lands in the budget audit either). Without the
+  // gateway refresh, a worker booted before `config set` never saw the
+  // DB-plane chat model and every extraction silently returned no_events.
   'chronicle_extract',
   // Open-loop commitment extraction (google source kind): same judge shape
   // as chronicle_extract, same stale-gateway failure class.
@@ -2319,9 +2322,9 @@ export async function registerBuiltinHandlers(
   // LLM spend per page; no shell). Enqueued by the put_page chronicle backstop
   // and by `gbrain chronicle backfill`. Idempotent (content-addressed event
   // slugs + projection upsert), so a retry re-runs to the same state.
-  // #3387: registered via registerBuiltinJob (gateway-refresh wrap) — the
-  // judge is a gateway chat call, so a stale worker gateway meant silent
-  // no_events for every extraction.
+  // Registered via registerBuiltinJob, NOT worker.register: GATEWAY_REFRESH_JOB_NAMES
+  // is only consulted inside registerBuiltinJob, so listing the name while
+  // registering raw leaves the gateway unconfigured anyway (#3387).
   registerBuiltinJob(worker, engine, 'chronicle_extract', async (job) => {
     const slug = typeof job.data.slug === 'string' ? job.data.slug : undefined;
     if (!slug) throw new Error('chronicle_extract job requires data.slug');

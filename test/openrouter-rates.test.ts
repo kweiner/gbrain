@@ -294,7 +294,8 @@ describe('budget gate (isModelPriceable) — the path that actually gates spend'
       modelId: 'openrouter:anthropic/claude-sonnet-4-6',
       inputTokens: 1_000_000,
       outputTokens: 0,
-    }, 'chat');
+      kind: 'chat',
+    });
     expect(tracker.totalSpent).toBeCloseTo(9, 6);
   });
 
