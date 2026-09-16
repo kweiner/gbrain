@@ -15,7 +15,7 @@ import { ollama } from './ollama.ts';
 import { openrouter } from './openrouter.ts';
 import { voyage } from './voyage.ts';
 import { litellmProxy } from './litellm-proxy.ts';
-import { ninerouter } from './ninerouter.ts';
+import { nineRouter } from './9router.ts';
 import { deepseek } from './deepseek.ts';
 import { groq } from './groq.ts';
 import { together } from './together.ts';
@@ -43,7 +43,7 @@ const ALL: Recipe[] = [
   openrouter,
   voyage,
   litellmProxy,
-  ninerouter,
+  nineRouter,
   deepseek,
   groq,
   together,
