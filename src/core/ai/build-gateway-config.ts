@@ -64,6 +64,7 @@ export function buildGatewayConfig(c: GBrainConfig): AIGatewayConfig {
   if (process.env.OLLAMA_BASE_URL) envBaseUrls['ollama'] = process.env.OLLAMA_BASE_URL;
   if (process.env.LMSTUDIO_BASE_URL) envBaseUrls['lmstudio'] = process.env.LMSTUDIO_BASE_URL;
   if (process.env.LITELLM_BASE_URL) envBaseUrls['litellm'] = process.env.LITELLM_BASE_URL;
+  if (process.env.NINEROUTER_BASE_URL) envBaseUrls['ninerouter'] = process.env.NINEROUTER_BASE_URL;
   if (process.env.OPENROUTER_BASE_URL) envBaseUrls['openrouter'] = process.env.OPENROUTER_BASE_URL;
 
   // #3350: native base-URL fold — MUST read the file plane directly, not `c`
