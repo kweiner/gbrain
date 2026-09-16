@@ -25,7 +25,7 @@ import type { Recipe } from '../types.ts';
 // gateway could hit. If gbrain grows more than one such gateway target, this
 // might be worth generalizing into a shared `openai-compatible` guard rather
 // than a per-recipe fetch shim.
-const ninerouterCompatFetch = (async (
+const nineRouterCompatFetch = (async (
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<Response> => {
@@ -50,15 +50,20 @@ const ninerouterCompatFetch = (async (
  * exposing an OpenAI-compatible REST surface over dozens of providers plus
  * user-defined "combos" (named model lists with fallback/round-robin/fusion
  * strategies). Point gbrain at a combo the same way any other model is
- * addressed: `ninerouter:<combo-name>` or `ninerouter:<provider>/<model>`.
+ * addressed: `9router:<combo-name>` or `9router:<provider>/<model>`.
+ *
+ * `id: '9router'` (not `ninerouter`) so `gbrain config get models.tier.*`
+ * reads the way the product is actually named. The env vars can't follow
+ * suit — POSIX/shell identifiers may not start with a digit, so
+ * `NINEROUTER_BASE_URL` / `NINEROUTER_API_KEY` stay spelled out.
  *
  * Distinct from the `litellm` recipe even though both are generic
- * `openai-compatible` templates: kept separate so `NINEROUTER_BASE_URL` /
- * `NINEROUTER_API_KEY` and `gbrain config get models.tier.*` read honestly —
- * nothing here runs the actual LiteLLM proxy project.
+ * `openai-compatible` templates: kept separate so `gbrain config get
+ * models.tier.*` reads honestly — nothing here runs the actual LiteLLM
+ * proxy project.
  */
-export const ninerouter: Recipe = {
-  id: 'ninerouter',
+export const nineRouter: Recipe = {
+  id: '9router',
   name: '9Router',
   tier: 'openai-compat',
   implementation: 'openai-compatible',
@@ -99,6 +104,6 @@ export const ninerouter: Recipe = {
       price_last_verified: '2026-09-16',
     },
   },
-  setup_hint: 'Run 9Router (https://github.com/decolua/9router) or point at a remote instance; set NINEROUTER_BASE_URL (include the /v1 suffix, e.g. http://localhost:20128/v1) and NINEROUTER_API_KEY if the instance requires one, then use ninerouter:<combo-or-provider/model>.',
-  compat: { fetch: ninerouterCompatFetch },
+  setup_hint: 'Run 9Router (https://github.com/decolua/9router) or point at a remote instance; set NINEROUTER_BASE_URL (include the /v1 suffix, e.g. http://localhost:20128/v1) and NINEROUTER_API_KEY if the instance requires one, then use 9router:<combo-or-provider/model>.',
+  compat: { fetch: nineRouterCompatFetch },
 };
